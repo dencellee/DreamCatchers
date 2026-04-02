@@ -8,6 +8,7 @@ import traceback
 from functools import wraps
 from flask import Flask, request, jsonify
 from datetime import datetime, timedelta
+from urllib.parse import parse_qs, urlparse
 from werkzeug.security import generate_password_hash, check_password_hash
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -138,6 +139,33 @@ MAX_LOGIN_ATTEMPTS = 10
 FAILED_ATTEMPTS = {}
 # Track last login time per user+ip to avoid log spam
 LAST_LOGIN_LOG = {}
+
+
+def log_database_url_diagnostics(db_url):
+    if not db_url:
+        logger.warning("[DB] DATABASE_URL is empty or missing.")
+        return
+
+    try:
+        parsed = urlparse(db_url)
+        query = parse_qs(parsed.query)
+        sslmode = query.get("sslmode", ["(not set)"])[0]
+        port = parsed.port or "(not set)"
+        dbname = parsed.path.lstrip("/") or "(not set)"
+
+        logger.info(
+            f"[DB] Parsed DATABASE_URL -> scheme={parsed.scheme or '(missing)'}, "
+            f"host={parsed.hostname or '(missing)'}, port={port}, db={dbname}, sslmode={sslmode}"
+        )
+
+        if not parsed.hostname:
+            logger.warning("[DB] DATABASE_URL host is missing.")
+        elif "." not in parsed.hostname and parsed.hostname.startswith("dpg-"):
+            logger.warning(
+                "[DB] DATABASE_URL host looks incomplete for Render. Use the full hostname from the Render dashboard."
+            )
+    except Exception as exc:
+        logger.warning(f"[DB] Could not parse DATABASE_URL for diagnostics: {exc}")
 
 def init_db():
     try:
@@ -726,6 +754,7 @@ logger.info("\n" + "="*60)
 logger.info("[SERVER] BacBot Auth Server with PostgreSQL")
 logger.info("="*60)
 logger.info(f"[DEBUG] DATABASE_URL set: {'Yes' if DATABASE_URL else 'NO - MISSING!'}")
+log_database_url_diagnostics(DATABASE_URL)
 logger.info(f"[DEBUG] ADMIN_API_KEY set: {'Yes' if ADMIN_API_KEY else 'NO'}")
 logger.info("="*60)
 

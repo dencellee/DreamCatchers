@@ -365,8 +365,9 @@ def verify_license():
                 LAST_LOGIN_LOG[login_key] = now
 
         strategy_result = get_strategy(key)
+        default_amounts = [5, 5, 10, 15, 30, 50, 70, 110, 170, 270, 450, 700, 1250, 2250, 4000, 6000, 9000]
+        
         if not strategy_result:
-            default_amounts = [5, 5, 10, 15, 30, 50, 70, 110, 170, 270, 450, 700, 1250, 2250, 4000, 6000, 9000]
             default_strategy = {
                 str(i + 1): {"amount": default_amounts[i], "side": "2"}
                 for i in range(len(default_amounts))
@@ -378,6 +379,32 @@ def verify_license():
             if isinstance(strategy_data, str):
                 strategy_data = json.loads(strategy_data)
             max_goal = strategy_result['max_goal']
+            
+            # Sanitize old Baccarat strategies to Dream Catcher format
+            # Convert PLAYER/BANKER sides to "2" (Dream Catcher target)
+            is_old_format = any(
+                isinstance(v, dict) and v.get('side') in ('PLAYER', 'BANKER')
+                for v in strategy_data.values()
+            )
+            if is_old_format:
+                logger.info(f"[MIGRATE] Converting old Baccarat strategy to Dream Catcher for {key[:10]}...")
+                strategy_data = {
+                    str(i + 1): {"amount": default_amounts[i], "side": "2"}
+                    for i in range(len(default_amounts))
+                }
+                # Update database with new strategy
+                try:
+                    conn_update = get_db()
+                    cursor_update = conn_update.cursor()
+                    cursor_update.execute(
+                        "UPDATE strategies SET strategy_data = %s WHERE license_key = %s",
+                        (json.dumps(strategy_data), key)
+                    )
+                    conn_update.commit()
+                    cursor_update.close()
+                    conn_update.close()
+                except Exception as e:
+                    logger.error(f"[ERROR] Failed to update strategy: {e}")
 
         return jsonify({
             "status": "success",

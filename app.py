@@ -366,7 +366,11 @@ def verify_license():
 
         strategy_result = get_strategy(key)
         if not strategy_result:
-            default_strategy = {str(i): {"amount": 100 * (2 ** (i-1)), "side": "PLAYER"} for i in range(1, 12)}
+            default_amounts = [5, 5, 10, 15, 30, 50, 70, 110, 170, 270, 450, 700, 1250, 2250, 4000, 6000, 9000]
+            default_strategy = {
+                str(i + 1): {"amount": default_amounts[i], "side": "2"}
+                for i in range(len(default_amounts))
+            }
             strategy_data = default_strategy
             max_goal = 20
         else:
@@ -488,11 +492,11 @@ def add_user():
                 VALUES (%s, %s, %s, %s, %s)
             """, (username, full_name, license_key, hwid if hwid else None, expires_at))
             # Insert default strategy for new account (Strategy 1)
-            default_amounts = [4, 12, 28, 60, 124, 252, 508, 1020, 2044, 4092, 8188]
+            default_amounts = [5, 5, 10, 15, 30, 50, 70, 110, 170, 270, 450, 700, 1250, 2250, 4000, 6000, 9000]
             default_strategy = {
                 str(i+1): {
                     "amount": default_amounts[i],
-                    "side": "PLAYER" if (i+1) % 2 == 1 else "BANKER"
+                    "side": "2"
                 }
                 for i in range(len(default_amounts))
             }

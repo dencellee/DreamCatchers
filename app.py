@@ -723,15 +723,15 @@ def status():
 # Initialize database when app starts (works with both local dev and Gunicorn in production)
 
 logger.info("\n" + "="*60)
-logger.info("[SERVER] BacBot Auth Server with PostgreSQL")
+logger.info("[SERVER] Dream Catcher Bot Auth Server with PostgreSQL")
 logger.info("="*60)
 logger.info(f"[DEBUG] DATABASE_URL set: {'Yes' if DATABASE_URL else 'NO - MISSING!'}")
 logger.info(f"[DEBUG] ADMIN_API_KEY set: {'Yes' if ADMIN_API_KEY else 'NO'}")
 logger.info("="*60)
 
 if not DATABASE_URL:
-    logger.critical("[CRITICAL] DATABASE_URL not set! Railway PostgreSQL not linked properly.")
-    logger.warning("[FIX] Go to Railway dashboard and link PostgreSQL service to web service.")
+    logger.critical("[CRITICAL] DATABASE_URL not set! Configure your local/production PostgreSQL connection.")
+    logger.warning("[FIX] Set DATABASE_URL in your environment before running the server.")
 else:
     try:
         init_db()

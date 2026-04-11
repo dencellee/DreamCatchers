@@ -365,7 +365,7 @@ def verify_license():
                 LAST_LOGIN_LOG[login_key] = now
 
         strategy_result = get_strategy(key)
-        default_amounts = [5, 5, 10, 15, 30, 50, 70, 110, 170, 270, 450, 700, 1250, 2250, 4000, 6000, 9000]
+        default_amounts = [5, 5, 5, 10, 15, 25, 40, 60, 90, 140, 230, 350, 550, 800, 1300, 2200, 3500, 5750, 8500, 13500]
         
         if not strategy_result:
             default_strategy = {
@@ -374,11 +374,13 @@ def verify_license():
             }
             strategy_data = default_strategy
             max_goal = 20
+            strategy_name = 'aggressive'
         else:
             strategy_data = strategy_result['strategy_data']
             if isinstance(strategy_data, str):
                 strategy_data = json.loads(strategy_data)
             max_goal = strategy_result['max_goal']
+            strategy_name = strategy_result.get('strategy_name', 'custom')
             
             # Sanitize old Baccarat strategies to Dream Catcher format
             # Convert PLAYER/BANKER sides to "2" (Dream Catcher target)
@@ -416,7 +418,8 @@ def verify_license():
             },
             "config": {
                 "strategy": strategy_data,
-                "max_goal": max_goal
+                "max_goal": max_goal,
+                "strategy_name": strategy_name
             }
         }), 200
 
@@ -605,6 +608,51 @@ def set_strategy():
                 pass
             logger.error(f"[ERROR] set_strategy: {e}\n{traceback.format_exc()}")
             return jsonify({"status": "error", "message": str(e), "debug": traceback.format_exc()}), 500
+
+@app.route('/user/update_strategy_preset', methods=['POST'])
+def update_strategy_preset():
+    """User updates their selected strategy preset"""
+    try:
+        data = request.get_json(force=True, silent=True)
+        license_key = str(data.get('license_key', '')).strip()
+        preset_name = str(data.get('preset_name', '')).strip()
+        strategy_data = data.get('strategy_data', {})
+        max_goal = int(data.get('max_goal', 20))
+
+        if not license_key:
+            return jsonify({"status": "error", "message": "Missing license_key"}), 400
+
+        user = get_user_by_key(license_key)
+        if not user:
+            return jsonify({"status": "error", "message": "User not found"}), 404
+
+        conn = get_db()
+        if not conn:
+            return jsonify({"status": "error", "message": "DB connection failed"}), 500
+
+        try:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO strategies (license_key, strategy_data, max_goal, strategy_name)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (license_key) DO UPDATE SET
+                    strategy_data = EXCLUDED.strategy_data,
+                    max_goal = EXCLUDED.max_goal,
+                    strategy_name = EXCLUDED.strategy_name
+            """, (license_key, json.dumps(strategy_data), max_goal, preset_name))
+            conn.commit()
+            cursor.close()
+            conn.close()
+
+            logger.info(f"[STRATEGY] User {license_key[:10]}... updated preset to: {preset_name}")
+            return jsonify({"status": "success", "message": f"Strategy updated to {preset_name}"}), 200
+        except Exception as e:
+            conn.close()
+            logger.error(f"[ERROR] update_strategy_preset: {e}")
+            return jsonify({"status": "error", "message": str(e)}), 400
+    except Exception as e:
+        logger.error(f"[ERROR] update_strategy_preset: {e}\n{traceback.format_exc()}")
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/admin/list_users', methods=['GET'])
 @require_admin_key

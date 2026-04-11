@@ -514,6 +514,19 @@ def sync_action():
                 conn.close()
                 return jsonify({"status": "success", "message": "Net profit recorded for RESET_CYCLE"}), 200
 
+            # Handle profit snapshots (every 30 minutes)
+            if action == 'PROFIT_SNAPSHOT':
+                # Just log the current state, don't synced individual bets
+                cursor.execute("""
+                    INSERT INTO betting_history (license_key, action, amount, live_balance, profit)
+                    VALUES (%s, %s, %s, %s, %s)
+                """, (key, 'SNAPSHOT', 0, live_balance, profit))
+                conn.commit()
+                cursor.close()
+                conn.close()
+                logger.info(f"[PROFIT] Snapshot for {key[:10]}...: Balance={live_balance}, Profit={profit}")
+                return jsonify({"status": "success", "message": "Profit snapshot recorded"}), 200
+
             # For other actions, save full bet history
             side = request.form.get('side', None)
             cursor.execute("""

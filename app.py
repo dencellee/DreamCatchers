@@ -208,6 +208,20 @@ def init_db():
         cursor.execute('''CREATE INDEX IF NOT EXISTS idx_license ON betting_history (license_key)''')
         cursor.execute('''CREATE INDEX IF NOT EXISTS idx_timestamp ON betting_history (timestamp)''')
 
+        cursor.execute('''CREATE TABLE IF NOT EXISTS login_history (
+            id SERIAL PRIMARY KEY,
+            license_key VARCHAR(255) NOT NULL,
+            username VARCHAR(255),
+            ip_address VARCHAR(45),
+            login_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            status VARCHAR(20) DEFAULT 'success',
+            reason VARCHAR(255),
+            FOREIGN KEY(license_key) REFERENCES users(license_key) ON DELETE CASCADE
+        )''')
+
+        cursor.execute('''CREATE INDEX IF NOT EXISTS idx_login_license ON login_history (license_key)''')
+        cursor.execute('''CREATE INDEX IF NOT EXISTS idx_login_time ON login_history (login_time)''')
+
         conn.commit()
         cursor.close()
         conn.close()
@@ -298,6 +312,22 @@ def log_failed_attempt(key):
     if FAILED_ATTEMPTS[key]['count'] >= MAX_LOGIN_ATTEMPTS:
         logger.warning(f"[SECURITY] Account locked due to too many attempts: {key[:10]}...")
 
+def log_login_attempt(license_key, username, ip_address, status='success', reason=None):
+    """Log user login attempt to database"""
+    try:
+        conn = get_db()
+        if conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO login_history (license_key, username, ip_address, status, reason)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (license_key, username, ip_address, status, reason))
+            conn.commit()
+            cursor.close()
+            conn.close()
+    except Exception as e:
+        logger.warning(f"[DB] Failed to log login attempt: {e}")
+
 @app.route('/verify.php', methods=['POST'])
 def verify_license():
     try:
@@ -315,11 +345,13 @@ def verify_license():
 
         if not user:
             log_failed_attempt(key)
+            log_login_attempt(key, 'UNKNOWN', request.remote_addr, 'failed', 'Invalid license key')
             logger.warning(f"[SECURITY] Invalid license key attempt: {key[:10]}...")
             return jsonify({"status": "error", "message": "Authentication failed"}), 401
 
         if not user['active']:
             log_failed_attempt(key)
+            log_login_attempt(key, user['username'], request.remote_addr, 'failed', 'Account deactivated')
             logger.warning(f"[SECURITY] Attempt to use deactivated license: {key[:10]}...")
             return jsonify({"status": "error", "message": "Authentication failed"}), 401
 
@@ -329,6 +361,7 @@ def verify_license():
                 expires = datetime.fromisoformat(expires)
             if datetime.now() > expires:
                 log_failed_attempt(key)
+                log_login_attempt(key, user['username'], request.remote_addr, 'failed', 'License expired')
                 logger.warning(f"[SECURITY] Attempt to use expired license: {key[:10]}...")
                 return jsonify({"status": "error", "message": "Authentication failed"}), 401
 
@@ -336,6 +369,7 @@ def verify_license():
         if user['hwid']:
             if user['hwid'] != hwid:
                 log_failed_attempt(key)
+                log_login_attempt(key, user['username'], request.remote_addr, 'failed', 'HWID mismatch')
                 logger.warning(f"[SECURITY] HWID mismatch for license: {key[:10]}... (Expected: {user['hwid']}, Got: {hwid})")
                 return jsonify({"status": "error", "message": "Authentication failed: HWID mismatch"}), 401
         else:
@@ -407,6 +441,9 @@ def verify_license():
                     conn_update.close()
                 except Exception as e:
                     logger.error(f"[ERROR] Failed to update strategy: {e}")
+
+        # Log successful login
+        log_login_attempt(key, user['username'], request.remote_addr, 'success', None)
 
         return jsonify({
             "status": "success",
@@ -822,6 +859,126 @@ def user_stats(license_key):
             "max_goal": max_goal
         }
     }), 200
+
+@app.route('/admin/login_history', methods=['GET'])
+@require_admin_key
+def get_login_history():
+    """Get login history for all users or specific user"""
+    license_key = request.args.get('license_key', None)
+    limit = int(request.args.get('limit', 100))
+    
+    conn = get_db()
+    if not conn:
+        return jsonify({"status": "error", "message": "Database connection failed"}), 500
+
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        if license_key:
+            # Get login history for specific user
+            cursor.execute("""
+                SELECT license_key, username, ip_address, login_time, status, reason
+                FROM login_history
+                WHERE license_key = %s
+                ORDER BY login_time DESC
+                LIMIT %s
+            """, (license_key, limit))
+        else:
+            # Get all login history
+            cursor.execute("""
+                SELECT license_key, username, ip_address, login_time, status, reason
+                FROM login_history
+                ORDER BY login_time DESC
+                LIMIT %s
+            """, (limit,))
+        
+        rows = cursor.fetchall()
+        history = [
+            {
+                "license_key": r["license_key"],
+                "username": r["username"],
+                "ip_address": r["ip_address"],
+                "login_time": r["login_time"].isoformat(),
+                "status": r["status"],
+                "reason": r["reason"]
+            }
+            for r in rows
+        ]
+        
+        cursor.close()
+        conn.close()
+        
+        return jsonify({
+            "status": "success",
+            "login_history": history,
+            "count": len(history)
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"[login_history] ERROR: {e}")
+        conn.rollback()
+        cursor.close()
+        conn.close()
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/admin/login_stats', methods=['GET'])
+@require_admin_key
+def get_login_stats():
+    """Get login statistics"""
+    conn = get_db()
+    if not conn:
+        return jsonify({"status": "error", "message": "Database connection failed"}), 500
+
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        # Total logins
+        cursor.execute("SELECT COUNT(*) as total_logins FROM login_history")
+        total = cursor.fetchone()['total_logins']
+        
+        # Successful logins
+        cursor.execute("SELECT COUNT(*) as success_count FROM login_history WHERE status = 'success'")
+        success = cursor.fetchone()['success_count']
+        
+        # Failed logins
+        cursor.execute("SELECT COUNT(*) as fail_count FROM login_history WHERE status = 'failed'")
+        failed = cursor.fetchone()['fail_count']
+        
+        # Logins by reason
+        cursor.execute("""
+            SELECT reason, COUNT(*) as count FROM login_history WHERE status = 'failed'
+            GROUP BY reason
+        """)
+        reasons = [{"reason": r["reason"], "count": r["count"]} for r in cursor.fetchall()]
+        
+        # Unique users
+        cursor.execute("SELECT COUNT(DISTINCT username) as unique_users FROM login_history")
+        unique = cursor.fetchone()['unique_users']
+        
+        # Unique IPs
+        cursor.execute("SELECT COUNT(DISTINCT ip_address) as unique_ips FROM login_history")
+        ips = cursor.fetchone()['unique_ips']
+        
+        cursor.close()
+        conn.close()
+        
+        return jsonify({
+            "status": "success",
+            "stats": {
+                "total_logins": total,
+                "successful_logins": success,
+                "failed_logins": failed,
+                "unique_users": unique,
+                "unique_ips": ips,
+                "failure_reasons": reasons,
+                "success_rate": f"{(success / total * 100):.1f}%" if total > 0 else "0%"
+            }
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"[login_stats] ERROR: {e}")
+        conn.rollback()
+        cursor.close()
+        conn.close()
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/status', methods=['GET'])
 def status():

@@ -521,8 +521,8 @@ def add_user():
                 INSERT INTO users (username, full_name, license_key, hwid, expires_at)
                 VALUES (%s, %s, %s, %s, %s)
             """, (username, full_name, license_key, hwid if hwid else None, expires_at))
-            # Insert default strategy for new account (Strategy 1)
-            default_amounts = [5, 5, 10, 15, 30, 50, 70, 110, 170, 270, 450, 700, 1250, 2250, 4000, 6000, 9000]
+            # Insert default strategy for new account (Aggressive - 20 levels)
+            default_amounts = [5, 5, 5, 10, 15, 25, 40, 60, 90, 140, 230, 350, 550, 800, 1300, 2200, 3500, 5750, 8500, 13500]
             default_strategy = {
                 str(i+1): {
                     "amount": default_amounts[i],
@@ -535,7 +535,7 @@ def add_user():
                     INSERT INTO strategies (license_key, strategy_data, max_goal, strategy_name)
                     VALUES (%s, %s, %s, %s)
                     ON CONFLICT (license_key) DO NOTHING
-                """, (license_key, json.dumps(default_strategy), 20, 'Strategy 1'))
+                """, (license_key, json.dumps(default_strategy), 30, 'Aggressive'))
             except Exception:
                 # If strategies table doesn't exist or insert fails, ignore; user still created
                 pass

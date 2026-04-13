@@ -140,6 +140,8 @@ FAILED_ATTEMPTS = {}
 # Track last login time per user+ip to avoid log spam
 LAST_LOGIN_LOG = {}
 
+DEFAULT_STRATEGY_AMOUNTS = [5, 5, 5, 10, 15, 25, 40, 60, 90, 140, 230, 350, 550, 800, 1300, 2200, 3500, 5750, 8500, 13500]
+
 
 def log_database_url_diagnostics(db_url):
     if not db_url:
@@ -236,6 +238,25 @@ def init_db():
         )''')
 
         cursor.execute('''CREATE INDEX IF NOT EXISTS idx_template_key ON strategy_templates (template_key)''')
+
+        # Ensure the default strategy is always available in Manage Strategies.
+        cursor.execute('''
+            INSERT INTO strategy_templates (template_key, name, description, amounts, max_goal, created_by)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT (template_key) DO UPDATE SET
+                name = EXCLUDED.name,
+                description = EXCLUDED.description,
+                amounts = EXCLUDED.amounts,
+                max_goal = EXCLUDED.max_goal,
+                updated_at = CURRENT_TIMESTAMP
+        ''', (
+            'aggressive',
+            'Aggressive (20 levels) - DEFAULT',
+            'Default Dream Catcher strategy',
+            json.dumps(DEFAULT_STRATEGY_AMOUNTS),
+            30,
+            'system'
+        ))
 
         conn.commit()
         cursor.close()

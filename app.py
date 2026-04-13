@@ -1046,6 +1046,53 @@ else:
 
 # ============ ADMIN: STRATEGY TEMPLATE MANAGEMENT ============
 
+@app.route('/user/strategies/list', methods=['POST'])
+def list_user_strategy_templates():
+    """List strategy templates for authenticated users (no admin key required)."""
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        key = str(data.get('key', '')).strip()
+        hwid = str(data.get('hwid', '')).strip()
+
+        if not key:
+            return jsonify({"status": "error", "message": "Missing license key"}), 400
+
+        user = get_user_by_key(key)
+        if not user:
+            return jsonify({"status": "error", "message": "Authentication failed"}), 401
+
+        if not user.get('active'):
+            return jsonify({"status": "error", "message": "Account inactive"}), 401
+
+        expires = user.get('expires_at')
+        if expires:
+            if isinstance(expires, str):
+                expires = datetime.fromisoformat(expires)
+            if datetime.now() > expires:
+                return jsonify({"status": "error", "message": "License expired"}), 401
+
+        # Enforce HWID check when account is already bound.
+        if user.get('hwid') and hwid and user['hwid'] != hwid:
+            return jsonify({"status": "error", "message": "HWID mismatch"}), 401
+
+        conn = get_db()
+        if not conn:
+            return jsonify({"status": "error", "message": "Database connection failed"}), 500
+
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT template_key, name, description, amounts, max_goal FROM strategy_templates ORDER BY created_at DESC")
+        templates = cursor.fetchall()
+        cursor.close()
+        conn.close()
+
+        if templates:
+            templates = [dict(t) for t in templates]
+
+        return jsonify({"status": "success", "templates": templates or []}), 200
+    except Exception as e:
+        logger.error(f"[ERROR] list_user_strategy_templates: {e}\n{traceback.format_exc()}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
 @app.route('/admin/strategies/list', methods=['GET'])
 @require_admin_key
 def list_strategy_templates():

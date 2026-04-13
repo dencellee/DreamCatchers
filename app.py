@@ -193,20 +193,21 @@ def init_db():
             FOREIGN KEY(license_key) REFERENCES users(license_key) ON DELETE CASCADE
         )''')
 
-        cursor.execute('''CREATE TABLE IF NOT EXISTS betting_history (
+        # Profit-only tracking table (replaces per-bet action history).
+        cursor.execute('''CREATE TABLE IF NOT EXISTS profit_snapshots (
             id SERIAL PRIMARY KEY,
             license_key VARCHAR(255) NOT NULL,
-            action VARCHAR(50),
-            amount DECIMAL(10,2),
-            side VARCHAR(16),
+            action VARCHAR(50) DEFAULT 'SNAPSHOT',
             live_balance DECIMAL(10,2),
             profit DECIMAL(10,2),
+            start_balance DECIMAL(10,2),
+            max_goal DECIMAL(10,2),
             timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(license_key) REFERENCES users(license_key) ON DELETE CASCADE
         )''')
 
-        cursor.execute('''CREATE INDEX IF NOT EXISTS idx_license ON betting_history (license_key)''')
-        cursor.execute('''CREATE INDEX IF NOT EXISTS idx_timestamp ON betting_history (timestamp)''')
+        cursor.execute('''CREATE INDEX IF NOT EXISTS idx_profit_snapshots_license ON profit_snapshots (license_key)''')
+        cursor.execute('''CREATE INDEX IF NOT EXISTS idx_profit_snapshots_timestamp ON profit_snapshots (timestamp)''')
 
         cursor.execute('''CREATE TABLE IF NOT EXISTS login_history (
             id SERIAL PRIMARY KEY,
@@ -221,6 +222,20 @@ def init_db():
 
         cursor.execute('''CREATE INDEX IF NOT EXISTS idx_login_license ON login_history (license_key)''')
         cursor.execute('''CREATE INDEX IF NOT EXISTS idx_login_time ON login_history (login_time)''')
+
+        cursor.execute('''CREATE TABLE IF NOT EXISTS strategy_templates (
+            id SERIAL PRIMARY KEY,
+            template_key VARCHAR(100) UNIQUE NOT NULL,
+            name VARCHAR(150) NOT NULL,
+            description TEXT,
+            amounts JSON NOT NULL,
+            max_goal INTEGER DEFAULT 20,
+            created_by VARCHAR(255),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )''')
+
+        cursor.execute('''CREATE INDEX IF NOT EXISTS idx_template_key ON strategy_templates (template_key)''')
 
         conn.commit()
         cursor.close()
@@ -271,18 +286,6 @@ def get_strategy(license_key):
         logger.error(f"[ERROR] Query failed: {e}\n{traceback.format_exc()}")
         conn.close()
         return None
-
-def require_admin_key(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        api_key = request.headers.get('X-Admin-Key', '')
-
-        if not api_key or api_key != ADMIN_API_KEY:
-            logger.warning(f"[SECURITY] Unauthorized admin access attempt from {request.remote_addr}")
-            return jsonify({"error": "Unauthorized. Invalid or missing admin key."}), 401
-
-        return f(*args, **kwargs)
-    return decorated_function
 
 def check_rate_limit(key):
     if key not in FAILED_ATTEMPTS:
@@ -503,41 +506,44 @@ def sync_action():
 
                 amount = max_goal_val
 
-            if action == 'RESET_CYCLE':
-                # Save only the total net profit for the user
-                cursor.execute("""
-                    INSERT INTO betting_history (license_key, action, amount, live_balance, profit)
-                    VALUES (%s, %s, %s, %s, %s)
-                """, (key, action, 0, live_balance, profit))
-                conn.commit()
-                cursor.close()
-                conn.close()
-                return jsonify({"status": "success", "message": "Net profit recorded for RESET_CYCLE"}), 200
+            if action in ('RESET_CYCLE', 'PROFIT_SNAPSHOT'):
+                # Store profit-only snapshots; no per-bet/action tracking.
+                try:
+                    live_balance_val = float(live_balance)
+                except Exception:
+                    live_balance_val = 0.0
 
-            # Handle profit snapshots (every 30 minutes)
-            if action == 'PROFIT_SNAPSHOT':
-                # Just log the current state, don't synced individual bets
+                try:
+                    profit_val = float(profit)
+                except Exception:
+                    profit_val = 0.0
+
+                try:
+                    start_balance_val = float(start_balance) if start_balance is not None else None
+                except Exception:
+                    start_balance_val = None
+
+                try:
+                    max_goal_val = float(max_goal) if max_goal is not None else None
+                except Exception:
+                    max_goal_val = None
+
+                snapshot_action = 'RESET_CYCLE' if action == 'RESET_CYCLE' else 'SNAPSHOT'
                 cursor.execute("""
-                    INSERT INTO betting_history (license_key, action, amount, live_balance, profit)
-                    VALUES (%s, %s, %s, %s, %s)
-                """, (key, 'SNAPSHOT', 0, live_balance, profit))
+                    INSERT INTO profit_snapshots (license_key, action, live_balance, profit, start_balance, max_goal)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """, (key, snapshot_action, live_balance_val, profit_val, start_balance_val, max_goal_val))
                 conn.commit()
                 cursor.close()
                 conn.close()
-                logger.info(f"[PROFIT] Snapshot for {key[:10]}...: Balance={live_balance}, Profit={profit}")
+                logger.info(f"[PROFIT] Snapshot for {key[:10]}...: Action={snapshot_action}, Balance={live_balance_val}, Profit={profit_val}")
                 return jsonify({"status": "success", "message": "Profit snapshot recorded"}), 200
 
-            # For other actions, save full bet history
-            side = request.form.get('side', None)
-            cursor.execute("""
-                INSERT INTO betting_history (license_key, action, amount, side, live_balance, profit)
-                VALUES (%s, %s, %s, %s, %s, %s)
-            """, (key, action, amount, side, live_balance, profit))
             conn.commit()
             cursor.close()
             conn.close()
-
-            return jsonify({"status": "success", "message": "Action recorded"}), 200
+            logger.info(f"[SYNC] Ignored non-profit action for {key[:10]}...: {action}")
+            return jsonify({"status": "success", "message": "Ignored: profit-only tracking enabled"}), 200
         except Exception as e:
             conn.close()
             print(f"[ERROR] sync_action: {e}")
@@ -780,8 +786,8 @@ def user_stats(license_key):
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
         cursor.execute("""
-            SELECT action, COUNT(*) as count, SUM(amount) as total_amount, SUM(profit) as total_profit
-            FROM betting_history
+            SELECT action, COUNT(*) as count, 0::numeric as total_amount, SUM(profit) as total_profit
+            FROM profit_snapshots
             WHERE license_key = %s
             GROUP BY action
         """, (license_key,))
@@ -797,14 +803,13 @@ def user_stats(license_key):
     total_net_profit = None
     full_history = []
 
-    logger.info("[user_stats] Querying betting_history for daily profit and history...")
+    logger.info("[user_stats] Querying profit_snapshots for daily profit and history...")
     try:
         # Use Asia/Manila timezone for daily profit calculation
         cursor.execute("""
-            SELECT profit, timestamp FROM betting_history
+                        SELECT profit, timestamp FROM profit_snapshots
             WHERE license_key = %s
               AND (timestamp AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date = (CURRENT_DATE AT TIME ZONE 'Asia/Manila')
-              AND action IN ('WIN', 'LOSS')
             ORDER BY timestamp ASC
         """, (license_key,))
         rows = cursor.fetchall()
@@ -819,9 +824,9 @@ def user_stats(license_key):
         conn.rollback()
         return jsonify({'status': 'error', 'message': f'daily profit/history query failed: {e}'}), 500
 
-    logger.info("[user_stats] Querying betting_history for total profit...")
+    logger.info("[user_stats] Querying profit_snapshots for total profit...")
     try:
-        cursor.execute("SELECT SUM(profit) as total_profit FROM betting_history WHERE license_key = %s AND action IN ('WIN', 'LOSS')", (license_key,))
+        cursor.execute("SELECT SUM(profit) as total_profit FROM profit_snapshots WHERE license_key = %s", (license_key,))
         net_row = cursor.fetchone()
         total_net_profit = float(net_row['total_profit']) if net_row and net_row['total_profit'] is not None else 0.0
     except Exception as e:
@@ -829,10 +834,10 @@ def user_stats(license_key):
         conn.rollback()
         return jsonify({'status': 'error', 'message': f'total profit query failed: {e}'}), 500
 
-    logger.info("[user_stats] Querying betting_history for full history...")
+    logger.info("[user_stats] Querying profit_snapshots for full history...")
     try:
         cursor.execute("""
-            SELECT action, amount, profit, timestamp FROM betting_history
+            SELECT action, live_balance, profit, timestamp FROM profit_snapshots
             WHERE license_key = %s
             ORDER BY timestamp ASC
         """, (license_key,))
@@ -840,7 +845,7 @@ def user_stats(license_key):
         for r in full_rows:
             full_history.append({
                 "action": r["action"],
-                "amount": float(r["amount"]),
+                "amount": float(r["live_balance"] or 0),
                 "profit": float(r["profit"]),
                 "timestamp": r["timestamp"].isoformat()
             })
@@ -1017,6 +1022,197 @@ else:
     except Exception as e:
         logger.warning(f"Database initialization failed: {e}")
         logger.info("[INFO] App will still start - database will retry on first request")
+
+# ============ ADMIN: STRATEGY TEMPLATE MANAGEMENT ============
+
+@app.route('/admin/strategies/list', methods=['GET'])
+@require_admin_key
+def list_strategy_templates():
+    """List all strategy templates"""
+    try:
+        conn = get_db()
+        if not conn:
+            return jsonify({"error": "Database connection failed"}), 500
+        
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT * FROM strategy_templates ORDER BY created_at DESC")
+        templates = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        
+        # Convert to list if needed
+        if templates:
+            templates = [dict(t) for t in templates]
+        
+        return jsonify({"status": "success", "templates": templates or []}), 200
+    except Exception as e:
+        logger.error(f"[ERROR] list_strategy_templates: {e}\n{traceback.format_exc()}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/admin/strategies/create', methods=['POST'])
+@require_admin_key
+def create_strategy_template():
+    """Create a new strategy template"""
+    try:
+        data = request.get_json()
+        template_key = data.get('template_key', '').strip().lower()
+        name = data.get('name', '').strip()
+        description = data.get('description', '').strip()
+        amounts = data.get('amounts', [])
+        max_goal = int(data.get('max_goal', 20))
+        
+        if not template_key or not name or not amounts:
+            return jsonify({"error": "Missing required fields"}), 400
+        
+        if not isinstance(amounts, list) or len(amounts) == 0:
+            return jsonify({"error": "Amounts must be non-empty list"}), 400
+        
+        # Validate amounts are numbers
+        try:
+            amounts = [int(x) for x in amounts]
+        except:
+            return jsonify({"error": "All amounts must be integers"}), 400
+        
+        conn = get_db()
+        if not conn:
+            return jsonify({"error": "Database connection failed"}), 500
+        
+        try:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO strategy_templates (template_key, name, description, amounts, max_goal, created_by)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (template_key, name, description, json.dumps(amounts), max_goal, "admin"))
+            conn.commit()
+            cursor.close()
+            conn.close()
+            
+            logger.info(f"[STRATEGY] Created new template: {template_key}")
+            return jsonify({"status": "success", "message": f"Strategy '{name}' created"}), 201
+        except psycopg2.IntegrityError:
+            conn.close()
+            return jsonify({"error": f"Strategy '{template_key}' already exists"}), 400
+        except Exception as e:
+            conn.rollback()
+            conn.close()
+            logger.error(f"[ERROR] create_strategy_template: {e}")
+            return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logger.error(f"[ERROR] create_strategy_template: {e}\n{traceback.format_exc()}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/admin/strategies/update', methods=['POST'])
+@require_admin_key
+def update_strategy_template():
+    """Update an existing strategy template"""
+    try:
+        data = request.get_json()
+        template_key = data.get('template_key', '').strip().lower()
+        name = data.get('name', '').strip()
+        description = data.get('description', '').strip()
+        amounts = data.get('amounts', [])
+        max_goal = int(data.get('max_goal', 20))
+        
+        if not template_key:
+            return jsonify({"error": "Missing template_key"}), 400
+        
+        if amounts and isinstance(amounts, list):
+            try:
+                amounts = [int(x) for x in amounts]
+            except:
+                return jsonify({"error": "All amounts must be integers"}), 400
+        
+        conn = get_db()
+        if not conn:
+            return jsonify({"error": "Database connection failed"}), 500
+        
+        try:
+            cursor = conn.cursor()
+            update_fields = []
+            values = []
+            
+            if name:
+                update_fields.append("name = %s")
+                values.append(name)
+            if description:
+                update_fields.append("description = %s")
+                values.append(description)
+            if amounts:
+                update_fields.append("amounts = %s")
+                values.append(json.dumps(amounts))
+            if max_goal:
+                update_fields.append("max_goal = %s")
+                values.append(max_goal)
+            
+            update_fields.append("updated_at = CURRENT_TIMESTAMP")
+            values.append(template_key)
+            
+            query = f"UPDATE strategy_templates SET {', '.join(update_fields)} WHERE template_key = %s"
+            cursor.execute(query, values)
+            conn.commit()
+            
+            if cursor.rowcount == 0:
+                cursor.close()
+                conn.close()
+                return jsonify({"error": f"Template '{template_key}' not found"}), 404
+            
+            cursor.close()
+            conn.close()
+            
+            logger.info(f"[STRATEGY] Updated template: {template_key}")
+            return jsonify({"status": "success", "message": f"Strategy updated"}), 200
+        except Exception as e:
+            conn.rollback()
+            conn.close()
+            logger.error(f"[ERROR] update_strategy_template: {e}")
+            return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logger.error(f"[ERROR] update_strategy_template: {e}\n{traceback.format_exc()}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/admin/strategies/delete', methods=['POST'])
+@require_admin_key
+def delete_strategy_template():
+    """Delete a strategy template"""
+    try:
+        data = request.get_json()
+        template_key = data.get('template_key', '').strip().lower()
+        
+        if not template_key:
+            return jsonify({"error": "Missing template_key"}), 400
+        
+        # Prevent deletion of built-in strategies
+        builtin = ['conservative', 'moderate', 'aggressive', 'ultra_aggressive', 'slow_burn']
+        if template_key in builtin:
+            return jsonify({"error": f"Cannot delete built-in strategy '{template_key}'"}), 403
+        
+        conn = get_db()
+        if not conn:
+            return jsonify({"error": "Database connection failed"}), 500
+        
+        try:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM strategy_templates WHERE template_key = %s", (template_key,))
+            conn.commit()
+            
+            if cursor.rowcount == 0:
+                cursor.close()
+                conn.close()
+                return jsonify({"error": f"Template '{template_key}' not found"}), 404
+            
+            cursor.close()
+            conn.close()
+            
+            logger.info(f"[STRATEGY] Deleted template: {template_key}")
+            return jsonify({"status": "success", "message": f"Strategy deleted"}), 200
+        except Exception as e:
+            conn.rollback()
+            conn.close()
+            logger.error(f"[ERROR] delete_strategy_template: {e}")
+            return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logger.error(f"[ERROR] delete_strategy_template: {e}\n{traceback.format_exc()}")
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)

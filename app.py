@@ -140,7 +140,7 @@ FAILED_ATTEMPTS = {}
 # Track last login time per user+ip to avoid log spam
 LAST_LOGIN_LOG = {}
 
-DEFAULT_STRATEGY_AMOUNTS = [5, 5, 5, 10, 15, 25, 40, 60, 90, 140, 230, 350, 550, 800, 1300, 2200, 3500, 5750, 8500, 13500]
+DEFAULT_STRATEGY_AMOUNTS = [5, 5, 5, 10, 15, 25, 40, 60, 90, 140, 230, 350, 550, 800, 1300, 2200, 3500, 5750, 8500, 13500, 20500]
 
 
 def log_database_url_diagnostics(db_url):
@@ -251,7 +251,7 @@ def init_db():
                 updated_at = CURRENT_TIMESTAMP
         ''', (
             'aggressive',
-            'Aggressive (20 levels) - DEFAULT',
+            'Aggressive (21 levels) - DEFAULT',
             'Default Dream Catcher strategy',
             json.dumps(DEFAULT_STRATEGY_AMOUNTS),
             30,
@@ -298,7 +298,7 @@ def get_strategy(license_key):
 
     try:
         cursor = conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT strategy_data, max_goal FROM strategies WHERE license_key = %s", (license_key,))
+        cursor.execute("SELECT strategy_data, max_goal, strategy_name FROM strategies WHERE license_key = %s", (license_key,))
         result = cursor.fetchone()
         cursor.close()
         conn.close()
@@ -423,7 +423,7 @@ def verify_license():
                 LAST_LOGIN_LOG[login_key] = now
 
         strategy_result = get_strategy(key)
-        default_amounts = [5, 5, 5, 10, 15, 25, 40, 60, 90, 140, 230, 350, 550, 800, 1300, 2200, 3500, 5750, 8500, 13500]
+        default_amounts = DEFAULT_STRATEGY_AMOUNTS
         
         if not strategy_result:
             default_strategy = {
@@ -598,8 +598,8 @@ def add_user():
                 INSERT INTO users (username, full_name, license_key, hwid, expires_at)
                 VALUES (%s, %s, %s, %s, %s)
             """, (username, full_name, license_key, hwid if hwid else None, expires_at))
-            # Insert default strategy for new account (Aggressive - 20 levels)
-            default_amounts = [5, 5, 5, 10, 15, 25, 40, 60, 90, 140, 230, 350, 550, 800, 1300, 2200, 3500, 5750, 8500, 13500]
+            # Insert default strategy for new account (Aggressive - 21 levels)
+            default_amounts = DEFAULT_STRATEGY_AMOUNTS
             default_strategy = {
                 str(i+1): {
                     "amount": default_amounts[i],

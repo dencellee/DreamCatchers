@@ -1213,6 +1213,8 @@ def update_strategy_template():
                 values.append(max_goal)
             
             update_fields.append("updated_at = CURRENT_TIMESTAMP")
+            
+            # Append template_key for WHERE clause AFTER all SET values
             values.append(template_key)
             
             query = f"UPDATE strategy_templates SET {', '.join(update_fields)} WHERE template_key = %s"
@@ -1222,7 +1224,8 @@ def update_strategy_template():
             if cursor.rowcount == 0:
                 cursor.close()
                 conn.close()
-                return jsonify({"error": f"Template '{template_key}' not found"}), 404
+                logger.warning(f"[STRATEGY] Update returned 0 rows - template '{template_key}' may not exist. Query: {query}, Values: {[template_key]}")
+                return jsonify({"error": f"Template '{template_key}' not found in database"}), 404
             
             cursor.close()
             conn.close()
